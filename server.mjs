@@ -107,11 +107,17 @@ function stringifyUnknown(value) {
 
 function serializeError(error) {
   if (error instanceof Error) {
+    const extra = {};
+    for (const key of Object.getOwnPropertyNames(error)) {
+      if (key === 'name' || key === 'message' || key === 'stack' || key === 'cause') continue;
+      extra[key] = error[key];
+    }
     return {
       name: error.name,
       message: stringifyUnknown(error.message) || error.name || 'Unknown error',
       stack: error.stack,
-      cause: error.cause ? serializeError(error.cause) : undefined
+      cause: error.cause ? serializeError(error.cause) : undefined,
+      ...extra
     };
   }
 
