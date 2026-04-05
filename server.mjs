@@ -116,13 +116,16 @@ function serializeError(error) {
   }
 
   if (error && typeof error === 'object') {
+    const ctorName = error.constructor && error.constructor.name ? error.constructor.name : 'Object';
     const plain = {};
     for (const key of Object.getOwnPropertyNames(error)) {
       plain[key] = error[key];
     }
     return {
+      name: plain.name || ctorName,
       ...plain,
-      message: stringifyUnknown(plain.message || error)
+      message: stringifyUnknown(plain.message || error),
+      object_keys: Object.keys(plain)
     };
   }
 
@@ -237,12 +240,16 @@ async function loginAndExtractToken({ email, password, startUrl, timeoutMs }) {
   let lastUrl = '';
   let lastPageState = {};
   const consoleMessages = [];
-  const browser = await puppeteer.connect({
-    browserWSEndpoint: buildBrowserWSEndpoint(timeoutMs),
-    protocolTimeout: timeoutMs
-  });
+  let browser;
+  let browserWSEndpoint = '';
 
   try {
+    browserWSEndpoint = buildBrowserWSEndpoint(timeoutMs);
+    browser = await puppeteer.connect({
+      browserWSEndpoint,
+      protocolTimeout: timeoutMs
+    });
+
     stage = 'open_page';
     const page = await browser.newPage();
     page.setDefaultTimeout(timeoutMs);
@@ -331,12 +338,15 @@ async function loginAndExtractToken({ email, password, startUrl, timeoutMs }) {
     throw Object.assign(new Error(details.message || 'login_failed'), {
       stage,
       final_url: lastUrl,
+      browser_ws_endpoint_host: browserWSEndpoint ? new URL(browserWSEndpoint).host : '',
       page_state: lastPageState,
       console_messages: consoleMessages,
       original_error: details
     });
   } finally {
-    await browser.close().catch(() => {});
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
   }
 }
 
