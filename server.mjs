@@ -8,7 +8,7 @@ app.use(express.json({ limit: '256kb' }));
 const DEFAULT_START_URL = process.env.WEEZEVENT_START_URL || 'https://admin.weezevent.com/ticket/O1145913/events';
 const DEFAULT_TIMEOUT_MS = Number(process.env.WEEZEVENT_TIMEOUT_MS || 45000);
 
-function buildBrowserWSEndpoint() {
+function buildBrowserWSEndpoint(timeoutMs) {
   const browserlessUrl = process.env.BROWSERLESS_URL || '';
   if (!browserlessUrl) {
     throw new Error('BROWSERLESS_URL is missing');
@@ -20,6 +20,10 @@ function buildBrowserWSEndpoint() {
 
   if (token && !wsUrl.searchParams.has('token')) {
     wsUrl.searchParams.set('token', token);
+  }
+
+  if (!wsUrl.searchParams.has('timeout')) {
+    wsUrl.searchParams.set('timeout', String(Math.max(timeoutMs + 30000, 120000)));
   }
 
   return wsUrl.toString();
@@ -179,7 +183,7 @@ async function waitForSession(page, timeoutMs) {
 
 async function loginAndExtractToken({ email, password, startUrl, timeoutMs }) {
   const browser = await puppeteer.connect({
-    browserWSEndpoint: buildBrowserWSEndpoint(),
+    browserWSEndpoint: buildBrowserWSEndpoint(timeoutMs),
     protocolTimeout: timeoutMs
   });
 
