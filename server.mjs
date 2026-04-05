@@ -187,6 +187,15 @@ async function detectBlockingStep(page) {
     return 'captcha_or_bot_check';
   }
 
+  if (
+    state.text.includes('your email or password was not correct') ||
+    state.text.includes('email or password was not correct') ||
+    state.text.includes('votre email ou mot de passe est incorrect') ||
+    state.text.includes('identifiants incorrects')
+  ) {
+    return 'invalid_credentials';
+  }
+
   return '';
 }
 
