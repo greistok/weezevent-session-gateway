@@ -250,6 +250,40 @@ async function waitForSession(page, timeoutMs) {
   return { ok: false, error: 'session_not_found_before_timeout' };
 }
 
+async function waitForPostSubmitState(page, timeoutMs) {
+  const start = Date.now();
+
+  while (Date.now() - start < timeoutMs) {
+    if (page.isClosed()) {
+      return { ok: false, error: 'page_closed_after_submit' };
+    }
+
+    const session = await readOidcSession(page).catch(() => null);
+    if (session?.access_token) {
+      return { ok: true, state: 'session_ready', session };
+    }
+
+    const blocker = await detectBlockingStep(page).catch(() => '');
+    if (blocker) {
+      return { ok: false, error: blocker };
+    }
+
+    const pageState = await capturePageState(page);
+    const currentUrl = pageState.url || page.url();
+    if (currentUrl.startsWith('https://admin.weezevent.com/ticket/')) {
+      return {
+        ok: true,
+        state: 'admin_ready',
+        page_state: pageState
+      };
+    }
+
+    await sleep(750);
+  }
+
+  return { ok: false, error: 'post_submit_state_timeout' };
+}
+
 async function loginAndExtractToken({ email, password, startUrl, timeoutMs }) {
   let stage = 'connect_browser';
   let lastUrl = '';
@@ -325,13 +359,35 @@ async function loginAndExtractToken({ email, password, startUrl, timeoutMs }) {
     stage = 'submit_login_form';
     await Promise.allSettled([
       page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }),
-      page.click('button[type="submit"], button[name="save"]')
+      page.locator('input[name="_password"]').press('Enter').catch(() => {}),
+      page.click('button[type="submit"], button[name="save"]').catch(() => {})
     ]);
     lastUrl = page.url();
     lastPageState = await capturePageState(page);
 
+    stage = 'wait_post_submit_state';
+    const postSubmit = await waitForPostSubmitState(page, timeoutMs);
+    lastUrl = page.url();
+    lastPageState = await capturePageState(page);
+    if (!postSubmit.ok) {
+      return {
+        ok: false,
+        error: postSubmit.error,
+        final_url: page.url()
+      };
+    }
+
+    if (postSubmit.session?.access_token) {
+      return {
+        ok: true,
+        source: 'fresh_login',
+        ...postSubmit.session,
+        final_url: page.url()
+      };
+    }
+
     stage = 'wait_session';
-    const result = await waitForSession(page, timeoutMs);
+    const result = await waitForSession(page, Math.min(timeoutMs, 15000));
     lastUrl = page.url();
     lastPageState = await capturePageState(page);
     if (!result.ok) {
