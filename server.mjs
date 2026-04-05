@@ -93,21 +93,72 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function stringifyUnknown(value) {
+  if (value == null) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
 function serializeError(error) {
   if (error instanceof Error) {
     return {
       name: error.name,
-      message: error.message,
+      message: stringifyUnknown(error.message) || error.name || 'Unknown error',
       stack: error.stack,
       cause: error.cause ? serializeError(error.cause) : undefined
     };
   }
 
   if (error && typeof error === 'object') {
-    return JSON.parse(JSON.stringify(error, Object.getOwnPropertyNames(error)));
+    const plain = {};
+    for (const key of Object.getOwnPropertyNames(error)) {
+      plain[key] = error[key];
+    }
+    return {
+      ...plain,
+      message: stringifyUnknown(plain.message || error)
+    };
   }
 
-  return { message: String(error) };
+  return { message: stringifyUnknown(error) };
+}
+
+function summarizeConsoleMessage(message) {
+  return {
+    type: message.type(),
+    text: message.text()
+  };
+}
+
+async function capturePageState(page) {
+  if (!page || page.isClosed()) {
+    return { page_closed: true };
+  }
+
+  try {
+    return await page.evaluate(() => {
+      const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 1000);
+      return {
+        title: document.title || '',
+        url: location.href,
+        has_login_form: Boolean(
+          document.querySelector('input[name="_username"]') &&
+          document.querySelector('input[name="_password"]')
+        ),
+        body_excerpt: text
+      };
+    });
+  } catch (error) {
+    return {
+      state_capture_error: stringifyUnknown(error?.message || error)
+    };
+  }
 }
 
 async function detectBlockingStep(page) {
@@ -182,18 +233,37 @@ async function waitForSession(page, timeoutMs) {
 }
 
 async function loginAndExtractToken({ email, password, startUrl, timeoutMs }) {
+  let stage = 'connect_browser';
+  let lastUrl = '';
+  let lastPageState = {};
+  const consoleMessages = [];
   const browser = await puppeteer.connect({
     browserWSEndpoint: buildBrowserWSEndpoint(timeoutMs),
     protocolTimeout: timeoutMs
   });
 
   try {
+    stage = 'open_page';
     const page = await browser.newPage();
     page.setDefaultTimeout(timeoutMs);
+    page.on('console', message => {
+      if (consoleMessages.length < 20) {
+        consoleMessages.push(summarizeConsoleMessage(message));
+      }
+    });
+    page.on('framenavigated', frame => {
+      if (frame === page.mainFrame()) {
+        lastUrl = frame.url();
+      }
+    });
 
+    stage = 'goto_start_url';
     await page.goto(startUrl, { waitUntil: 'domcontentloaded' });
+    lastUrl = page.url();
     await maybeDismissCookieBanner(page);
+    lastPageState = await capturePageState(page);
 
+    stage = 'read_preexisting_session';
     const preSession = await readOidcSession(page).catch(() => null);
     if (preSession?.access_token) {
       return {
@@ -204,7 +274,10 @@ async function loginAndExtractToken({ email, password, startUrl, timeoutMs }) {
       };
     }
 
+    stage = 'wait_login_form_or_session';
     const loginStep = await waitForLoginFormOrSession(page, timeoutMs);
+    lastUrl = page.url();
+    lastPageState = await capturePageState(page);
     if (!loginStep.ok) {
       return {
         ok: false,
@@ -222,15 +295,23 @@ async function loginAndExtractToken({ email, password, startUrl, timeoutMs }) {
       };
     }
 
+    stage = 'type_credentials';
     await page.type('input[name="_username"]', email, { delay: 20 });
     await page.type('input[name="_password"]', password, { delay: 20 });
+    lastPageState = await capturePageState(page);
 
+    stage = 'submit_login_form';
     await Promise.allSettled([
       page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }),
       page.click('button[type="submit"], button[name="save"]')
     ]);
+    lastUrl = page.url();
+    lastPageState = await capturePageState(page);
 
+    stage = 'wait_session';
     const result = await waitForSession(page, timeoutMs);
+    lastUrl = page.url();
+    lastPageState = await capturePageState(page);
     if (!result.ok) {
       return {
         ok: false,
@@ -245,6 +326,15 @@ async function loginAndExtractToken({ email, password, startUrl, timeoutMs }) {
       ...result.session,
       final_url: page.url()
     };
+  } catch (error) {
+    const details = serializeError(error);
+    throw Object.assign(new Error(details.message || 'login_failed'), {
+      stage,
+      final_url: lastUrl,
+      page_state: lastPageState,
+      console_messages: consoleMessages,
+      original_error: details
+    });
   } finally {
     await browser.close().catch(() => {});
   }
@@ -273,6 +363,7 @@ app.post('/weezevent/session-token', requireSharedSecret, async (req, res) => {
     return res.status(result.ok ? 200 : 409).json(result);
   } catch (error) {
     const details = serializeError(error);
+    console.error('weezevent/session-token failed', JSON.stringify(details));
     return res.status(500).json({
       ok: false,
       error: 'gateway_failure',

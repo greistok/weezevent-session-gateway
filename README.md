@@ -1,22 +1,42 @@
 # Weezevent Session Gateway
 
-Petit service HTTP destine a etre appele par `Apps Script` pour obtenir un token de session `Weezevent` depuis un vrai navigateur.
+Service HTTP destine a etre appele par `Apps Script` pour obtenir un token de session `Weezevent` depuis un vrai navigateur.
 
-## But
+## Architecture retenue
 
-`Apps Script` sait faire du HTTP, mais pas un vrai login navigateur avec:
+Le service ne lance plus Chromium localement dans son propre conteneur.
 
-- redirections OIDC
-- formulaire HTML dynamique
-- CSRF
-- stockage de session dans `sessionStorage`
+Le flux final est:
 
-Ce service corrige ce point:
+1. `Apps Script` appelle le gateway HTTP
+2. le gateway se connecte en websocket a `Browserless`
+3. `Browserless` heberge la session Chromium reelle
+4. le gateway pilote la connexion `Weezevent`
+5. il lit `sessionStorage` (`oidc.user:*`)
+6. il renvoie le `access_token`
 
-1. il ouvre Chromium
-2. il se connecte a `Weezevent`
-3. il lit `sessionStorage` (`oidc.user:*`)
-4. il renvoie le `access_token`
+Services Render retenus:
+
+- Browserless:
+  - nom: `browserless-poc-render`
+  - service id: `srv-d7925j5m5p6s739qt1n0`
+  - URL: `https://browserless-poc-render.onrender.com`
+- Gateway:
+  - nom: `weezevent-session-gateway-render`
+  - service id: `srv-d792qi1r0fns73e8mirg`
+  - URL: `https://weezevent-session-gateway-render.onrender.com`
+
+Verification reelle validee le `2026-04-05`:
+
+- `POST /weezevent/session-token` retourne `HTTP 200`
+- le JSON contient:
+  - `ok: true`
+  - `source: fresh_login`
+  - `storage: sessionStorage`
+  - `storage_key: oidc.user:...`
+  - `access_token`
+  - `expires_at`
+  - `final_url: https://admin.weezevent.com/ticket/O1145913/events`
 
 ## Endpoint
 
@@ -30,8 +50,7 @@ Body JSON minimal:
 
 ```json
 {
-  "email": "estivalesdevolley.avb@gmail.com",
-  "password": "...."
+  "timeout_ms": 240000
 }
 ```
 
@@ -39,10 +58,8 @@ Body JSON complet possible:
 
 ```json
 {
-  "email": "estivalesdevolley.avb@gmail.com",
-  "password": "....",
   "start_url": "https://admin.weezevent.com/ticket/O1145913/events",
-  "timeout_ms": 45000
+  "timeout_ms": 240000
 }
 ```
 
@@ -69,6 +86,21 @@ Reponses de blocage typiques:
 - `captcha_or_bot_check`
 - `session_not_found_before_timeout`
 
+En cas de `500 gateway_failure`, la reponse JSON inclut maintenant des diagnostics exploitables:
+
+- `details.stage`
+- `details.final_url`
+- `details.page_state`
+- `details.console_messages`
+- `details.original_error`
+
+Le but est d'eviter les erreurs opaques du type `[object Object]` et d'identifier rapidement si l'echec vient:
+
+- du login `Weezevent`
+- d'une redirection OIDC
+- d'un `detached Frame`
+- d'un blocage navigateur/captcha/2FA
+
 ## Variables d'environnement
 
 - `SERVICE_SHARED_SECRET`
@@ -76,11 +108,16 @@ Reponses de blocage typiques:
 - `WEEZEVENT_PASSWORD`
 - `WEEZEVENT_START_URL`
 - `WEEZEVENT_TIMEOUT_MS`
-- `PUPPETEER_EXECUTABLE_PATH`
+- `BROWSERLESS_URL`
+- `BROWSERLESS_TOKEN`
 
 ## Docker
 
-Le conteneur est construit sur `ghcr.io/browserless/chromium:latest`.
+Le conteneur du gateway est construit sur `node:20-bookworm-slim`.
+
+Il ne contient pas Chromium.
+
+Il suppose un Browserless externe joignable.
 
 Build local:
 
@@ -93,6 +130,8 @@ Run local:
 ```bash
 docker run --rm -p 3000:3000 \
   -e SERVICE_SHARED_SECRET=change-me \
+  -e BROWSERLESS_URL=https://browserless-poc-render.onrender.com \
+  -e BROWSERLESS_TOKEN=change-me-too \
   -e WEEZEVENT_EMAIL=estivalesdevolley.avb@gmail.com \
   -e WEEZEVENT_PASSWORD='...' \
   weezevent-session-gateway
@@ -104,7 +143,7 @@ Test:
 curl -X POST http://localhost:3000/weezevent/session-token \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer change-me' \
-  -d '{"email":"estivalesdevolley.avb@gmail.com","password":"..."}'
+  -d '{"timeout_ms":240000}'
 ```
 
 ## Exemple Apps Script
@@ -145,4 +184,6 @@ function fetchWeezeventSessionToken_() {
 
 - `Apps Script` doit appeler ce service HTTP.
 - `Apps Script` ne doit pas tenter en priorite de parser lui-meme le login HTML `Weezevent`.
+- le gateway doit etre considere comme l'orchestrateur de login
+- le service Browserless brut doit etre considere comme une dependance technique du gateway, pas comme l'interface que `Apps Script` appelle directement
 - Si ce service renvoie `two_factor_required` ou `captcha_or_bot_check`, il faut traiter le probleme comme un blocage navigateur, pas comme un simple bug HTTP.
