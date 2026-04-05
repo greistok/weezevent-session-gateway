@@ -1,0 +1,17 @@
+{
+  "name": "weezevent-session-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "HTTP gateway for retrieving a Weezevent browser session token.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "puppeteer-core": "^24.24.1"
+  }
+}
