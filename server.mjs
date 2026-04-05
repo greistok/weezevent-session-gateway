@@ -81,6 +81,27 @@ async function maybeDismissCookieBanner(page) {
   }
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function serializeError(error) {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+      stack: error.stack,
+      cause: error.cause ? serializeError(error.cause) : undefined
+    };
+  }
+
+  if (error && typeof error === 'object') {
+    return JSON.parse(JSON.stringify(error, Object.getOwnPropertyNames(error)));
+  }
+
+  return { message: String(error) };
+}
+
 async function detectBlockingStep(page) {
   const state = await page.evaluate(() => {
     const text = (document.body.innerText || '').toLowerCase();
@@ -99,6 +120,37 @@ async function detectBlockingStep(page) {
   }
 
   return '';
+}
+
+async function waitForLoginFormOrSession(page, timeoutMs) {
+  const start = Date.now();
+
+  while (Date.now() - start < timeoutMs) {
+    const session = await readOidcSession(page).catch(() => null);
+    if (session?.access_token) {
+      return { ok: true, session };
+    }
+
+    const blocker = await detectBlockingStep(page).catch(() => '');
+    if (blocker) {
+      return { ok: false, error: blocker };
+    }
+
+    const hasLoginForm = await page.evaluate(() => {
+      return Boolean(
+        document.querySelector('input[name="_username"]') &&
+        document.querySelector('input[name="_password"]')
+      );
+    }).catch(() => false);
+
+    if (hasLoginForm) {
+      return { ok: true, loginFormReady: true };
+    }
+
+    await sleep(1000);
+  }
+
+  return { ok: false, error: 'login_form_not_found_before_timeout' };
 }
 
 async function waitForSession(page, timeoutMs) {
@@ -134,7 +186,7 @@ async function loginAndExtractToken({ email, password, startUrl, timeoutMs }) {
     await page.goto(startUrl, { waitUntil: 'domcontentloaded' });
     await maybeDismissCookieBanner(page);
 
-    const preSession = await readOidcSession(page);
+    const preSession = await readOidcSession(page).catch(() => null);
     if (preSession?.access_token) {
       return {
         ok: true,
@@ -144,8 +196,23 @@ async function loginAndExtractToken({ email, password, startUrl, timeoutMs }) {
       };
     }
 
-    await page.waitForSelector('input[name="_username"]', { timeout: 15000 });
-    await page.waitForSelector('input[name="_password"]', { timeout: 15000 });
+    const loginStep = await waitForLoginFormOrSession(page, timeoutMs);
+    if (!loginStep.ok) {
+      return {
+        ok: false,
+        error: loginStep.error,
+        final_url: page.url()
+      };
+    }
+
+    if (loginStep.session?.access_token) {
+      return {
+        ok: true,
+        source: 'existing_session',
+        ...loginStep.session,
+        final_url: page.url()
+      };
+    }
 
     await page.type('input[name="_username"]', email, { delay: 20 });
     await page.type('input[name="_password"]', password, { delay: 20 });
@@ -197,10 +264,12 @@ app.post('/weezevent/session-token', requireSharedSecret, async (req, res) => {
     const result = await loginAndExtractToken({ email, password, startUrl, timeoutMs });
     return res.status(result.ok ? 200 : 409).json(result);
   } catch (error) {
+    const details = serializeError(error);
     return res.status(500).json({
       ok: false,
       error: 'gateway_failure',
-      message: error instanceof Error ? error.message : String(error)
+      message: details.message || String(error),
+      details
     });
   }
 });
