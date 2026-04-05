@@ -8,8 +8,6 @@ RUN npm install --omit=dev
 COPY server.mjs ./
 
 ENV PORT=3000
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
-
 EXPOSE 3000
 
 CMD ["node", "server.mjs"]

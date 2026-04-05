@@ -1,6 +1,7 @@
 import express from 'express';
 import puppeteer from 'puppeteer-core';
 import fs from 'node:fs';
+import path from 'node:path';
 
 const app = express();
 
@@ -10,7 +11,7 @@ const DEFAULT_START_URL = process.env.WEEZEVENT_START_URL || 'https://admin.weez
 const DEFAULT_TIMEOUT_MS = Number(process.env.WEEZEVENT_TIMEOUT_MS || 45000);
 
 function pickExecutablePath() {
-  const candidates = [
+  const staticCandidates = [
     process.env.PUPPETEER_EXECUTABLE_PATH,
     '/usr/bin/google-chrome-stable',
     '/usr/bin/google-chrome',
@@ -18,8 +19,24 @@ function pickExecutablePath() {
     '/usr/bin/chromium'
   ].filter(Boolean);
 
+  const browserlessRoots = [
+    '/usr/local/bin/playwright-browsers',
+    '/ms-playwright'
+  ];
+
+  const dynamicCandidates = [];
+  for (const root of browserlessRoots) {
+    if (!fs.existsSync(root)) continue;
+
+    for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !entry.name.startsWith('chromium-')) continue;
+      dynamicCandidates.push(path.join(root, entry.name, 'chrome-linux', 'chrome'));
+    }
+  }
+
+  const candidates = [...staticCandidates, ...dynamicCandidates];
   const found = candidates.find(candidate => fs.existsSync(candidate));
-  return found || candidates[0];
+  return found || '';
 }
 
 function requireSharedSecret(req, res, next) {
@@ -119,8 +136,13 @@ async function waitForSession(page, timeoutMs) {
 }
 
 async function loginAndExtractToken({ email, password, startUrl, timeoutMs }) {
+  const executablePath = pickExecutablePath();
+  if (!executablePath) {
+    throw new Error('No Chromium executable found in container');
+  }
+
   const browser = await puppeteer.launch({
-    executablePath: pickExecutablePath(),
+    executablePath,
     headless: true,
     args: [
       '--no-sandbox',
