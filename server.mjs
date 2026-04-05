@@ -1,5 +1,6 @@
 import express from 'express';
 import puppeteer from 'puppeteer-core';
+import fs from 'node:fs';
 
 const app = express();
 
@@ -17,7 +18,8 @@ function pickExecutablePath() {
     '/usr/bin/chromium'
   ].filter(Boolean);
 
-  return candidates[0];
+  const found = candidates.find(candidate => fs.existsSync(candidate));
+  return found || candidates[0];
 }
 
 function requireSharedSecret(req, res, next) {
