@@ -70,14 +70,18 @@ async function readOidcSession(page) {
 }
 
 async function maybeDismissCookieBanner(page) {
-  const labels = ['Accepter', 'Accept', 'Tout accepter'];
-  const buttons = await page.$$('button');
-  for (const button of buttons) {
-    const text = await page.evaluate(el => (el.innerText || '').trim(), button);
-    if (labels.some(label => text.includes(label))) {
-      await button.click().catch(() => {});
-      return;
+  try {
+    const labels = ['Accepter', 'Accept', 'Tout accepter'];
+    const buttons = await page.$$('button');
+    for (const button of buttons) {
+      const text = await page.evaluate(el => (el.innerText || '').trim(), button).catch(() => '');
+      if (labels.some(label => text.includes(label))) {
+        await button.click().catch(() => {});
+        return;
+      }
     }
+  } catch {
+    // Ignore cookie-banner probing failures during auth redirects.
   }
 }
 
