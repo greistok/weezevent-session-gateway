@@ -1,7 +1,5 @@
 import express from 'express';
 import puppeteer from 'puppeteer-core';
-import fs from 'node:fs';
-import path from 'node:path';
 
 const app = express();
 
@@ -10,33 +8,21 @@ app.use(express.json({ limit: '256kb' }));
 const DEFAULT_START_URL = process.env.WEEZEVENT_START_URL || 'https://admin.weezevent.com/ticket/O1145913/events';
 const DEFAULT_TIMEOUT_MS = Number(process.env.WEEZEVENT_TIMEOUT_MS || 45000);
 
-function pickExecutablePath() {
-  const staticCandidates = [
-    process.env.PUPPETEER_EXECUTABLE_PATH,
-    '/usr/bin/google-chrome-stable',
-    '/usr/bin/google-chrome',
-    '/usr/bin/chromium-browser',
-    '/usr/bin/chromium'
-  ].filter(Boolean);
-
-  const browserlessRoots = [
-    '/usr/local/bin/playwright-browsers',
-    '/ms-playwright'
-  ];
-
-  const dynamicCandidates = [];
-  for (const root of browserlessRoots) {
-    if (!fs.existsSync(root)) continue;
-
-    for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-      if (!entry.isDirectory() || !entry.name.startsWith('chromium-')) continue;
-      dynamicCandidates.push(path.join(root, entry.name, 'chrome-linux', 'chrome'));
-    }
+function buildBrowserWSEndpoint() {
+  const browserlessUrl = process.env.BROWSERLESS_URL || '';
+  if (!browserlessUrl) {
+    throw new Error('BROWSERLESS_URL is missing');
   }
 
-  const candidates = [...staticCandidates, ...dynamicCandidates];
-  const found = candidates.find(candidate => fs.existsSync(candidate));
-  return found || '';
+  const token = process.env.BROWSERLESS_TOKEN || '';
+  const wsUrl = new URL(browserlessUrl);
+  wsUrl.protocol = wsUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+
+  if (token && !wsUrl.searchParams.has('token')) {
+    wsUrl.searchParams.set('token', token);
+  }
+
+  return wsUrl.toString();
 }
 
 function requireSharedSecret(req, res, next) {
@@ -136,20 +122,9 @@ async function waitForSession(page, timeoutMs) {
 }
 
 async function loginAndExtractToken({ email, password, startUrl, timeoutMs }) {
-  const executablePath = pickExecutablePath();
-  if (!executablePath) {
-    throw new Error('No Chromium executable found in container');
-  }
-
-  const browser = await puppeteer.launch({
-    executablePath,
-    headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu'
-    ]
+  const browser = await puppeteer.connect({
+    browserWSEndpoint: buildBrowserWSEndpoint(),
+    protocolTimeout: timeoutMs
   });
 
   try {
