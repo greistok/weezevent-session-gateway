@@ -695,6 +695,7 @@ app.get('/healthz', (_req, res) => {
   res.json({
     ok: true,
     service: 'weezevent-session-gateway',
+    version: '1.0.1-standalone',
     start_url: DEFAULT_START_URL,
     architecture: 'standalone-puppeteer'
   });
