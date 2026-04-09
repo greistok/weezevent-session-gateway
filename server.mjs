@@ -11,27 +11,6 @@ const WEEZEVENT_ACCOUNTS_URL = 'https://accounts.weezevent.com/';
 const DEBUG_ATTEMPT_HISTORY = [];
 const DEBUG_ATTEMPT_HISTORY_LIMIT = 20;
 
-function buildBrowserWSEndpoint(timeoutMs) {
-  const browserlessUrl = process.env.BROWSERLESS_URL || '';
-  if (!browserlessUrl) {
-    throw new Error('BROWSERLESS_URL is missing');
-  }
-
-  const token = process.env.BROWSERLESS_TOKEN || '';
-  const wsUrl = new URL(browserlessUrl);
-  wsUrl.protocol = wsUrl.protocol === 'https:' ? 'wss:' : 'ws:';
-
-  if (token && !wsUrl.searchParams.has('token')) {
-    wsUrl.searchParams.set('token', token);
-  }
-
-  if (!wsUrl.searchParams.has('timeout')) {
-    wsUrl.searchParams.set('timeout', String(Math.max(timeoutMs + 30000, 120000)));
-  }
-
-  return wsUrl.toString();
-}
-
 function requireSharedSecret(req, res, next) {
   const expected = process.env.SERVICE_SHARED_SECRET || '';
   if (!expected) {
@@ -412,13 +391,12 @@ async function waitForPostSubmitState(page, timeoutMs) {
 }
 
 async function loginAndExtractToken({ email, password, startUrl, timeoutMs, trace, attempt }) {
-  let stage = 'connect_browser';
+  let stage = 'launch_browser';
   let lastUrl = '';
   let lastPageState = {};
   const consoleMessages = [];
   let lastCapturedSession = null;
   let browser;
-  let browserWSEndpoint = '';
 
   function setStage(nextStage, extra) {
     stage = nextStage;
@@ -431,15 +409,25 @@ async function loginAndExtractToken({ email, password, startUrl, timeoutMs, trac
   }
 
   try {
-    browserWSEndpoint = buildBrowserWSEndpoint(timeoutMs);
-    pushTraceEvent(trace, 'connect_browser', {
+    pushTraceEvent(trace, 'launch_browser', {
       attempt,
-      browser_ws_endpoint_host: new URL(browserWSEndpoint).host,
       timeout_ms: timeoutMs
     });
-    browser = await puppeteer.connect({
-      browserWSEndpoint,
-      protocolTimeout: timeoutMs
+    
+    // Launch local chromium
+    browser = await puppeteer.launch({
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process',
+        '--disable-gpu'
+      ],
+      headless: true
     });
 
     setStage('open_page');
@@ -578,6 +566,10 @@ async function loginAndExtractToken({ email, password, startUrl, timeoutMs, trac
     const passSelector = (await page.$('input[name="_password"]')) ? 'input[name="_password"]' : 
                          (await page.$('input#password')) ? 'input#password' : 'input[name="password"]';
     
+    if (!userSelector || !passSelector) {
+        return { ok: false, error: 'login_selectors_not_found', final_url: page.url() };
+    }
+
     await page.type(userSelector, email, { delay: 20 });
     await page.type(passSelector, password, { delay: 20 });
     lastPageState = await capturePageState(page);
@@ -688,7 +680,6 @@ async function loginAndExtractToken({ email, password, startUrl, timeoutMs, trac
     throw Object.assign(new Error(details.message || 'login_failed'), {
       stage,
       final_url: lastUrl,
-      browser_ws_endpoint_host: browserWSEndpoint ? new URL(browserWSEndpoint).host : '',
       page_state: lastPageState,
       console_messages: consoleMessages,
       original_error: details
@@ -704,7 +695,8 @@ app.get('/healthz', (_req, res) => {
   res.json({
     ok: true,
     service: 'weezevent-session-gateway',
-    start_url: DEFAULT_START_URL
+    start_url: DEFAULT_START_URL,
+    architecture: 'standalone-puppeteer'
   });
 });
 
@@ -722,14 +714,7 @@ app.post('/weezevent/session-token', requireSharedSecret, async (req, res) => {
   const timeoutMs = Number(req.body?.timeout_ms || DEFAULT_TIMEOUT_MS);
   const trace = createAttemptTrace('/weezevent/session-token', {
     start_url: startUrl,
-    timeout_ms: timeoutMs,
-    browserless_host: (() => {
-      try {
-        return new URL(buildBrowserWSEndpoint(timeoutMs)).host;
-      } catch {
-        return '';
-      }
-    })()
+    timeout_ms: timeoutMs
   });
 
   if (!email || !password) {
@@ -794,7 +779,7 @@ app.get('/', (_req, res) => {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AVB Weezevent Gateway</title>
+    <title>AVB Weezevent Gateway (Standalone)</title>
     <style>
       :root { color-scheme: light; }
       body {
@@ -823,8 +808,8 @@ app.get('/', (_req, res) => {
   </head>
   <body>
     <main>
-      <h1>AVB Weezevent Gateway</h1>
-      <p>This Space hosts the HTTP gateway used by Apps Script to retrieve a Weezevent session token through an external Browserless service.</p>
+      <h1>AVB Weezevent Gateway (Standalone)</h1>
+      <p>This Space hosts the HTTP gateway used by Apps Script to retrieve a Weezevent session token. It uses an embedded Puppeteer/Chromium engine.</p>
       <ul>
         <li>Health check: <code>GET /healthz</code></li>
         <li>Token endpoint: <code>POST /weezevent/session-token</code></li>
